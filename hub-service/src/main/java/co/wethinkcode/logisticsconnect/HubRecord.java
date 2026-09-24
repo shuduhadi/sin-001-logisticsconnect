@@ -34,6 +34,6 @@ public class HubRecord {
     public void setActive(Boolean active) {this.active = active;}
 
     public List<String> getMergedFrom() { return mergedFrom;}
-    public void setMergedFrom(List<String> mergedFrom) { this.mergedFrom = mergedFrom˙;}
+    public void setMergedFrom(List<String> mergedFrom) { this.mergedFrom = mergedFrom;}
 
 }
