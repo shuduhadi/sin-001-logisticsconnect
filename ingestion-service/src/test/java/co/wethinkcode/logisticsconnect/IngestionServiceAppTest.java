@@ -3,7 +3,6 @@ package co.wethinkcode.logisticsconnect;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
-import org.junit.jupiter.api.TestFactory;
 
 import java.io.IOException;
 import java.time.LocalDate;
@@ -77,7 +76,7 @@ public class IngestionServiceAppTest {
 
         @Test
         void unrecognizedProvinceFallsBackToTitleCaseRatherThanFailing() {
-            assertEquals("Some New Provinnce", IngestionServiceApp.normalizeProvince("some new province"));
+            assertEquals("Some New Province", IngestionServiceApp.normalizeProvince("some new province"));
         }
 
     }
@@ -113,7 +112,7 @@ public class IngestionServiceAppTest {
         @Test
         void recognizesAllTrueVariantsCaseInsensitively() {
             for (String v : List.of("Y", "yes", "true", "TRUE", "1")) {
-                assertEquals(Boolean.TRUE, IngestionServiceApp.parseBoolen(v), "expected true for: " + v);
+                assertEquals(Boolean.TRUE, IngestionServiceApp.parseBoolean(v), "expected true for: " + v);
             }
         }
 
@@ -158,7 +157,7 @@ public class IngestionServiceAppTest {
 
         @Test
         void rejectsCalendarInvalidDateInsteadOfRollingItOver() {
-            assertnull(IngestionServiceApp.normalizeDate("2023-02-30"));
+            assertNull(IngestionServiceApp.normalizeDate("2023-02-30"));
         }
 
         @Test
@@ -255,7 +254,7 @@ public class IngestionServiceAppTest {
             assertTrue(result.stream().allMatch(r -> r.getMergedFrom().isEmpty()));
         }
     }
-/* End to end tests for loading and cleaninf the actual hubs-gloval.csv resource */
+/* End to end tests for loading and cleaning the actual hubs-gloval.csv resource */
     @Nested
     @DisplayName( "loadAndCleanHubs (integration)")
     class LoadAndCleanHubsTests {
@@ -266,16 +265,16 @@ public class IngestionServiceAppTest {
 
         }
         
-        @Test 
+       @Test
         void everyRecordhasCleanNonPlaceholderFields() throws IOException {
             List<HubRecord> hubs = IngestionServiceApp.loadAndCleanHubs();
-            
+
             for (HubRecord hub : hubs) {
-                assertFalse(hub.getHubId().isEmpty());
-                assertFalse(hub.getSortingCenter().isEmpty());
-                assertFalse(hub.getHubId().contains(" "));
-                assertFalse(hub.getSortingCenter().contains(" "));
-            }
+                assertFalse(hub.getHubId().isEmpty(), "empty hubId in: " + hub.getHubId());
+                assertFalse(hub.getSortingCenter().isEmpty(), "empty sortingCenter in hub: " + hub.getHubId());
+                assertFalse(hub.getHubId().contains("  "), "double space in hubId: [" + hub.getHubId() + "]");
+                assertFalse(hub.getSortingCenter().contains("  "), "double space in sortingCenter: [" + hub.getSortingCenter() + "] (hub " + hub.getHubId() + ")");
+             }
         }
 
         @Test
