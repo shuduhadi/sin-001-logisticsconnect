@@ -23,7 +23,6 @@ public class TransitServiceAppTest {
     private static final Clock FIXED_CLOCK = Clock.fixed(Instant.parse("2026-09-24T00:00:00Z"), ZoneOffset.UTC);
 
     private HttpServer hubStub;
-    private HttpServer delayStub;
     private Javalin app;
     private final HttpClient httpClient = HttpClient.newHttpClient();
 
@@ -31,56 +30,47 @@ public class TransitServiceAppTest {
     void tearDown() {
         if (app != null) app.stop();
         if (hubStub != null) hubStub.stop(0);
-        if (delayStub != null) delayStub.stop(0);
     }
 
-    private String startStub(HttpServer server, String path, int statusCode, String body) {
-        server.createContext(path, exchange -> {
+    private String startHubStub(int statusCode, String body) throws IOException {
+        hubStub = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
+        hubStub.createContext("/hubs/H-500", exchange -> {
             byte[] bytes = body.getBytes(StandardCharsets.UTF_8);
             exchange.sendResponseHeaders(statusCode, bytes.length);
             exchange.getResponseBody().write(bytes);
             exchange.close();
         });
-        return "http://localhost:" + server.getAddress().getPort();
-    }
-
-    private HttpServer newServer() throws IOException {
-        HttpServer server = HttpServer.create(new InetSocketAddress("localhost", 0), 0);
-        server.start();
-        return server;
+        hubStub.start();
+        return "http://localhost:" + hubStub.getAddress().getPort();
     }
 
     @Test
-    void returnsEtaWhenHubAndDelayStageBothFound() throws Exception {
-        hubStub = newServer();
-        String hubUrl = startStub(hubStub, "/hubs/H-500", 200,
+    void returnsEtaUsingStageFromCache() throws Exception {
+        String hubUrl = startHubStub(200,
                 "{\"hubId\":\"H-500\",\"province\":\"Gauteng\",\"sortingCenter\":\"Johannesburg Central\",\"active\":true,\"mergedFrom\":[]}");
 
-        delayStub = newServer();
-        String delayUrl = startStub(delayStub, "/delay-stage/H-500", 200, "{\"hubId\":\"H-500\",\"stage\":3}");
+        DelayStageCache cache = new DelayStageCache();
+        cache.updateStage("H-500", 3); // simulates a message already received via MQ
 
-        app = TransitServiceApp.createApp(hubUrl, delayUrl, FIXED_CLOCK).start(0);
+        app = TransitServiceApp.createApp(hubUrl, cache, FIXED_CLOCK).start(0);
 
         HttpResponse<String> response = httpClient.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-500")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(200, response.statusCode());
-        assertTrue(response.body().contains("\"hubId\":\"H-500\""));
         assertTrue(response.body().contains("\"delayStage\":3"));
         assertTrue(response.body().contains("2026-09-25T18:00:00Z")); // earliest: 24h + 3*6h
     }
 
     @Test
-    void missingDelayStageDefaultsToZeroRatherThanFailing() throws Exception {
-        hubStub = newServer();
-        String hubUrl = startStub(hubStub, "/hubs/H-500", 200,
+    void noMessageEverReceivedForHubDefaultsToZero() throws Exception {
+        String hubUrl = startHubStub(200,
                 "{\"hubId\":\"H-500\",\"province\":\"Gauteng\",\"sortingCenter\":\"Johannesburg Central\",\"active\":true,\"mergedFrom\":[]}");
 
-        delayStub = newServer();
-        String delayUrl = startStub(delayStub, "/delay-stage/H-500", 404, "{\"error\":\"No delay stage recorded for hub H-500\"}");
+        DelayStageCache cache = new DelayStageCache(); // empty - no message ever arrived
 
-        app = TransitServiceApp.createApp(hubUrl, delayUrl, FIXED_CLOCK).start(0);
+        app = TransitServiceApp.createApp(hubUrl, cache, FIXED_CLOCK).start(0);
 
         HttpResponse<String> response = httpClient.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-500")).GET().build(),
@@ -92,17 +82,13 @@ public class TransitServiceAppTest {
 
     @Test
     void unknownHubReturns404() throws Exception {
-        hubStub = newServer();
-        String hubUrl = startStub(hubStub, "/hubs/H-999", 404, "{\"error\":\"No hub found with id H-999\"}");
+        String hubUrl = startHubStub(404, "{\"error\":\"No hub found with id H-500\"}");
+        DelayStageCache cache = new DelayStageCache();
 
-        delayStub = newServer();
-        // delay-stage-service isn't even reached in this case, but stub it anyway to keep the test isolated
-        String delayUrl = startStub(delayStub, "/delay-stage/H-999", 404, "{}");
-
-        app = TransitServiceApp.createApp(hubUrl, delayUrl, FIXED_CLOCK).start(0);
+        app = TransitServiceApp.createApp(hubUrl, cache, FIXED_CLOCK).start(0);
 
         HttpResponse<String> response = httpClient.send(
-                HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-999")).GET().build(),
+                HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-500")).GET().build(),
                 HttpResponse.BodyHandlers.ofString());
 
         assertEquals(404, response.statusCode());
@@ -110,25 +96,9 @@ public class TransitServiceAppTest {
 
     @Test
     void hubServiceUnreachableReturns502() throws Exception {
-        delayStub = newServer();
-        String delayUrl = startStub(delayStub, "/delay-stage/H-500", 200, "{\"hubId\":\"H-500\",\"stage\":3}");
+        DelayStageCache cache = new DelayStageCache();
 
-        app = TransitServiceApp.createApp("http://localhost:1", delayUrl, FIXED_CLOCK).start(0);
-
-        HttpResponse<String> response = httpClient.send(
-                HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-500")).GET().build(),
-                HttpResponse.BodyHandlers.ofString());
-
-        assertEquals(502, response.statusCode());
-    }
-
-    @Test
-    void delayStageServiceUnreachableReturns502() throws Exception {
-        hubStub = newServer();
-        String hubUrl = startStub(hubStub, "/hubs/H-500", 200,
-                "{\"hubId\":\"H-500\",\"province\":\"Gauteng\",\"sortingCenter\":\"Johannesburg Central\",\"active\":true,\"mergedFrom\":[]}");
-
-        app = TransitServiceApp.createApp(hubUrl, "http://localhost:1", FIXED_CLOCK).start(0);
+        app = TransitServiceApp.createApp("http://localhost:1", cache, FIXED_CLOCK).start(0);
 
         HttpResponse<String> response = httpClient.send(
                 HttpRequest.newBuilder(URI.create("http://localhost:" + app.port() + "/transit/H-500")).GET().build(),
