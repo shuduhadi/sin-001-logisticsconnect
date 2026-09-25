@@ -10,14 +10,20 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.util.ArrayList;
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 public class DelayStageServiceAppTest {
 
-   
-    // parseStage - pure request-body validation, no HTTP
+    /** A publisher that does nothing - used in tests that don't care about MQ behavior. */
+    private static final DelayStagePublisher NO_OP_PUBLISHER = (hubId, stage) -> {};
+
     
+    // parseStage - pure request-body validation, no HTTP
+  
+    @Nested
     @DisplayName("parseStage")
     class ParseStageTests {
 
@@ -58,8 +64,9 @@ public class DelayStageServiceAppTest {
         }
     }
 
-   
-    // GET/POST /delay-stage/{hubId} - full endpoint, real Javalin instance
+     // GET/POST /delay-stage/{hubId} - full endpoint, real Javalin instance
+    
+    @Nested
     @DisplayName("GET/POST /delay-stage/{hubId} (integration)")
     class EndpointTests {
 
@@ -77,7 +84,7 @@ public class DelayStageServiceAppTest {
 
         @Test
         void postThenGetReturnsTheStoredStage() throws Exception {
-            app = DelayStageServiceApp.createApp(new DelayStageStore()).start(0);
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), NO_OP_PUBLISHER).start(0);
 
             HttpResponse<String> postResponse = httpClient.send(
                     HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
@@ -100,7 +107,7 @@ public class DelayStageServiceAppTest {
 
         @Test
         void getForUnknownHubReturns404() throws Exception {
-            app = DelayStageServiceApp.createApp(new DelayStageStore()).start(0);
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), NO_OP_PUBLISHER).start(0);
 
             HttpResponse<String> response = httpClient.send(
                     HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-999")).GET().build(),
@@ -111,7 +118,7 @@ public class DelayStageServiceAppTest {
 
         @Test
         void postWithOutOfRangeStageReturns400() throws Exception {
-            app = DelayStageServiceApp.createApp(new DelayStageStore()).start(0);
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), NO_OP_PUBLISHER).start(0);
 
             HttpResponse<String> response = httpClient.send(
                     HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
@@ -125,7 +132,7 @@ public class DelayStageServiceAppTest {
 
         @Test
         void postWithMalformedBodyReturns400() throws Exception {
-            app = DelayStageServiceApp.createApp(new DelayStageStore()).start(0);
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), NO_OP_PUBLISHER).start(0);
 
             HttpResponse<String> response = httpClient.send(
                     HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
@@ -139,7 +146,7 @@ public class DelayStageServiceAppTest {
 
         @Test
         void hubIdLookupIsCaseInsensitive() throws Exception {
-            app = DelayStageServiceApp.createApp(new DelayStageStore()).start(0);
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), NO_OP_PUBLISHER).start(0);
 
             httpClient.send(
                     HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/h-501"))
@@ -154,6 +161,85 @@ public class DelayStageServiceAppTest {
 
             assertEquals(200, response.statusCode());
             assertTrue(response.body().contains("\"stage\":4"));
+        }
+    }
+
+    
+    // POST /delay-stage/{hubId} triggers a publish (new for stage 3)
+    
+    @Nested
+    @DisplayName("MQ publish on POST (stage 3)")
+    class PublishOnPostTests {
+
+        /** Fake publisher - records calls instead of touching a real broker. */
+        static class RecordingPublisher implements DelayStagePublisher {
+            final List<String> published = new ArrayList<>();
+
+            @Override
+            public void publish(String hubId, int stage) {
+                published.add(hubId + ":" + stage);
+            }
+        }
+
+        private Javalin app;
+        private RecordingPublisher publisher;
+        private final HttpClient httpClient = HttpClient.newHttpClient();
+
+        @AfterEach
+        void tearDown() {
+            if (app != null) app.stop();
+        }
+
+        private String baseUrl() {
+            return "http://localhost:" + app.port();
+        }
+
+        @Test
+        void successfulPostPublishesTheNewStage() throws Exception {
+            publisher = new RecordingPublisher();
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), publisher).start(0);
+
+            httpClient.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"stage\":5}"))
+                            .header("Content-Type", "application/json")
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(List.of("H-501:5"), publisher.published);
+        }
+
+        @Test
+        void invalidPostDoesNotPublish() throws Exception {
+            publisher = new RecordingPublisher();
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), publisher).start(0);
+
+            httpClient.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"stage\":99}"))
+                            .header("Content-Type", "application/json")
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertTrue(publisher.published.isEmpty());
+        }
+
+        @Test
+        void postStillSucceedsWhenPublisherThrows() throws Exception {
+            DelayStagePublisher failingPublisher = (hubId, stage) -> {
+                throw new RuntimeException("broker unreachable");
+            };
+            app = DelayStageServiceApp.createApp(new DelayStageStore(), failingPublisher).start(0);
+
+            HttpResponse<String> response = httpClient.send(
+                    HttpRequest.newBuilder(URI.create(baseUrl() + "/delay-stage/H-501"))
+                            .POST(HttpRequest.BodyPublishers.ofString("{\"stage\":5}"))
+                            .header("Content-Type", "application/json")
+                            .build(),
+                    HttpResponse.BodyHandlers.ofString());
+
+            assertEquals(200, response.statusCode()); // publish failure must not break the REST write
+            assertTrue(response.body().contains("\"stage\":5"));
         }
     }
 }

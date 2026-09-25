@@ -15,28 +15,31 @@ import java.util.Optional;
  * doesn't call hub-service or ingestion-service. It accepts any {@code hubId}
  * string with no cross-service check that the hub actually exists.
  *
- * <p>{@code POST /delay-stage/{hubId}} is also where the stage-3 MQ publish
- * to {@code package-status-topic} will eventually happen (see
- * {@code co.wethinkcode.logisticsconnect.mq.MqConfig}) - not wired in yet
- * at this stage.
+ * <p>Stage 3: {@code POST /delay-stage/{hubId}} publishes the new stage to
+ * the {@code package-status-topic} MQ topic via {@link DelayStagePublisher},
+ * in addition to updating the in-memory store. Publish is best-effort - a
+ * broker failure is logged but never fails the REST response, since the
+ * store update is this service's source of truth and MQ is a notification
+ * layer on top of it.
  */
 public class DelayStageServiceApp {
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     public static void main(String[] args) {
-        createApp(new DelayStageStore()).start(7052);
+        createApp(new DelayStageStore(), new ActiveMqDelayStagePublisher()).start(7052);
     }
 
     /**
-     * Builds (but does not start) the Javalin app around the given store.
-     * Split from {@link #main} so tests can use an isolated, fresh store
-     * per test rather than sharing state.
+     * Builds (but does not start) the Javalin app around the given store
+     * and publisher. Split from {@link #main} so tests can use an isolated
+     * store and a fake publisher instead of a real broker.
      *
-     * @param store the delay-stage state to read from and write to
+     * @param store     the delay-stage state to read from and write to
+     * @param publisher notified of every successful stage change
      * @return the configured, unstarted Javalin app
      */
-    static Javalin createApp(DelayStageStore store) {
+    static Javalin createApp(DelayStageStore store, DelayStagePublisher publisher) {
         Javalin app = Javalin.create();
 
         app.get("/health", ctx -> ctx.result("OK"));
@@ -69,9 +72,14 @@ public class DelayStageServiceApp {
             store.setStage(hubId, stage);
             ctx.json(Map.of("hubId", hubId, "stage", stage));
 
-            // MQ TODO (stage 3): publish { hubId, stage, timestamp } to
-            // MqConfig.TOPIC here, replacing transit-service's direct
-            // GET call to this endpoint with a subscription instead.
+            try {
+                publisher.publish(hubId, stage);
+            } catch (Exception e) {
+                // Best-effort: the REST write already succeeded above and the
+                // response is already sent. A broker outage shouldn't take
+                // down this service's core write path.
+                System.err.printf("Failed to publish delay-stage change for %s: %s%n", hubId, e.getMessage());
+            }
         });
 
         return app;
